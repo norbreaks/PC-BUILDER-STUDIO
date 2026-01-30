@@ -1,0 +1,141 @@
+// src/context/BuildContext.jsx
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import apiClient from '../api/apiClient';
+import { useAuth } from './AuthContext'; // Import useAuth to ensure user is logged in
+
+const BuildContext = createContext(null);
+
+export const useBuild = () => useContext(BuildContext);
+
+export const BuildProvider = ({ children }) => {
+    // build state will hold the entire PCBuild object from the backend
+    const [currentBuild, setCurrentBuild] = useState(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState(null);
+
+    // Get authentication status and user
+    const { isAuthenticated, user } = useAuth();
+
+    useEffect(() => {
+        // Only load if the user is authenticated and user.id is available
+        if (isAuthenticated && user?.id) {
+            loadActiveBuild();
+        } else {
+            setCurrentBuild(null);
+            setIsLoading(false);
+        }
+    }, [isAuthenticated, user]); // Re-run when user updates
+
+    // --- Core API Interaction Functions ---
+
+    // 1. Load the User's Active Build (called on login)
+    const loadActiveBuild = async () => {
+        // Guard Clause: If user is null OR user.id is missing, stop here.
+        if (!isAuthenticated || !user || !user.id) {
+            console.warn("Skipping loadActiveBuild: User ID not available.");
+            return;
+        }
+
+        setIsLoading(true);
+        setError(null);
+        try {
+            // This is your GET /builds/active endpoint
+            const response = await apiClient.get('/builds/active');
+
+            // Assuming your backend returns a list, find the main 'Draft' build.
+            // For simplicity, we'll just take the first one or create a new one.
+            let build = response.data[0];
+
+            if (!build) {
+                // If no build exists, create a new one for the user
+                build = await createNewBuild();
+            }
+
+            setCurrentBuild(build);
+        } catch (err) {
+            console.error('Failed to load active build:', err);
+            setError('Could not load or initialize the PC build.');
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    // 2. Helper to create a new build if none exists
+    const createNewBuild = async () => {
+        // Use the actual user ID from AuthContext
+        const userId = user?.id;
+
+        if (!userId) {
+            throw new Error('User ID not available');
+        }
+
+        const response = await apiClient.post('/builds', {
+            user_id: userId,
+            name: 'My New PC Build',
+        });
+        return response.data;
+    };
+
+
+    // 3. Add a Component (Handles the critical compatibility check!)
+    const addComponent = async (partId, category) => {
+        setError(null);
+        if (!currentBuild || isLoading) return { success: false, error: 'Build not loaded yet.' };
+
+        try {
+            // This calls your secure POST /builds/{build_id}/add endpoint
+            const response = await apiClient.post(`/builds/${currentBuild._id}/add`, {
+                part_id: partId,
+                category: category,
+                quantity: 1
+            });
+
+            // Success: Update the local state with the new build data from the server
+            setCurrentBuild(response.data);
+            return { success: true };
+
+        } catch (err) {
+            const compatibilityError = err.response?.data?.detail || 'An unknown error occurred.';
+            setError(compatibilityError);
+
+            // CRITICAL: Propagate the error so the calling component (PartCard) can display the reason.
+            return { success: false, error: compatibilityError };
+        }
+    };
+
+    // 4. Remove a Component
+    const removeComponent = async (partId) => {
+        setError(null);
+        if (!currentBuild || isLoading) return { success: false, error: 'Build not loaded yet.' };
+
+        try {
+            // This calls your secure DELETE /builds/{build_id}/remove/{part_id} endpoint
+            const response = await apiClient.delete(`/builds/${currentBuild._id}/remove/${partId}`);
+
+            // Success: Update the local state
+            setCurrentBuild(response.data);
+            return { success: true };
+        } catch (err) {
+            console.error('Failed to remove component:', err);
+            setError(err.response?.data?.detail || 'Failed to remove component.');
+            return { success: false, error: err.response?.data?.detail };
+        }
+    };
+
+    const value = {
+        currentBuild,
+        isLoading,
+        error,
+        loadActiveBuild,
+        addComponent,
+        removeComponent,
+        // Helper to quickly check if a part is already in the build
+        isPartInBuild: (partId) => currentBuild?.components.some(item => item.part_id === partId)
+    };
+
+    return (
+        <BuildContext.Provider value={value}>
+            {children}
+        </BuildContext.Provider>
+    );
+};
